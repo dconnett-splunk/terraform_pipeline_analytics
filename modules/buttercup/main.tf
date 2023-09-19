@@ -23,24 +23,26 @@ locals {
 }
 
 provider "kubernetes" {
-  host                   = module.eks_blueprints.eks_cluster_endpoint
-  cluster_ca_certificate = base64decode(module.eks_blueprints.eks_cluster_certificate_authority_data)
+  host                   = module.eks.cluster_endpoint
+  cluster_ca_certificate = base64decode(module.eks.cluster_certificate_authority_data)
   token                  = data.aws_eks_cluster_auth.this.token
 }
 
 provider "helm" {
   kubernetes {
-    host                   = module.eks_blueprints.eks_cluster_endpoint
-    cluster_ca_certificate = base64decode(module.eks_blueprints.eks_cluster_certificate_authority_data)
+    host                   = module.eks.cluster_endpoint
+    cluster_ca_certificate = base64decode(module.eks.cluster_certificate_authority_data)
     token                  = data.aws_eks_cluster_auth.this.token
   }
 }
 
 data "aws_eks_cluster_auth" "this" {
-  name = module.eks_blueprints.eks_cluster_id
+  name = module.eks.cluster_name
 }
 
 data "aws_availability_zones" "available" {}
+data "aws_caller_identity" "current" {}
+
 
 #---------------------------------------------------------------
 # Supporting Resources
@@ -48,7 +50,7 @@ data "aws_availability_zones" "available" {}
 
 module "vpc" {
   source  = "terraform-aws-modules/vpc/aws"
-  version = "~> 3.0"
+  version = "~> 5.0"
 
   name = local.name
   cidr = local.vpc_cidr
@@ -89,20 +91,41 @@ data "aws_iam_policy" "AmazonEBSCSIDriverPolicy" {
   arn = "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"
 }
 
-module "eks_blueprints" {
-  source = "github.com/aws-ia/terraform-aws-eks-blueprints"
+module "eks" {
+  source  = "terraform-aws-modules/eks/aws"
+  version = "~> 19.13"
 
-  cluster_name    = local.cluster_name
-  cluster_version = "1.23"
+  cluster_name                   = local.name
+  cluster_version                = "1.26"
+  cluster_endpoint_public_access = true # Backwards compat
+  cluster_enabled_log_types = ["api", "audit", "authenticator",
+  "controllerManager", "scheduler"] # Backwards compat
 
-  vpc_id             = module.vpc.vpc_id
-  private_subnet_ids = module.vpc.private_subnets
+  iam_role_name            = "${local.name}-cluster-role" # Backwards compat
+  iam_role_use_name_prefix = false                        # Backwards compat
 
-  managed_node_groups = {
-    mg_5 = {
-      node_group_name = "managed-ondemand"
+  kms_key_aliases = [local.name] # Backwards compat
 
-      instance_types = ["m5.2xlarge"]
+  vpc_id     = module.vpc.vpc_id
+  subnet_ids = module.vpc.private_subnets
+
+  manage_aws_auth_configmap = true
+  aws_auth_roles = [
+    {
+      rolearn  = data.aws_caller_identity.current.arn
+      username = "me"
+      groups   = ["system:masters"]
+    },
+  ]
+
+  eks_managed_node_groups = {
+    managed = {
+      iam_role_name              = "${local.name}-managed" # Backwards compat
+      iam_role_use_name_prefix   = false                   # Backwards compat
+      use_custom_launch_template = false                   # Backwards compat
+
+
+      instance_types = ["t3.small"]
       capacity_type  = "ON_DEMAND"
       disk_size      = 150
 
@@ -111,9 +134,14 @@ module "eks_blueprints" {
       min_size        = 2
       max_unavailable = 1
 
-      subnet_ids = module.vpc.private_subnets
+
+      labels = {
+        Which = "managed"
+      }
+
     }
   }
+
 
   # Add self-managed node groups
   # self_managed_node_groups = {
@@ -134,12 +162,14 @@ module "eks_blueprints" {
 }
 
 module "eks_blueprints_kubernetes_addons" {
-  source = "github.com/aws-ia/terraform-aws-eks-blueprints?ref=v4.32.1//modules/kubernetes-addons"
+  source  = "aws-ia/eks-blueprints-addons/aws"
+  version = "~> 1.0"
 
-  eks_cluster_id       = module.eks_blueprints.eks_cluster_id
-  eks_cluster_endpoint = module.eks_blueprints.eks_cluster_endpoint
-  eks_oidc_provider    = module.eks_blueprints.oidc_provider
-  eks_cluster_version  = module.eks_blueprints.eks_cluster_version
+
+  cluster_name      = module.eks.cluster_name
+  cluster_endpoint  = module.eks.cluster_endpoint
+  cluster_version   = module.eks.cluster_version
+  oidc_provider_arn = module.eks.oidc_provider
 
   # EKS Managed Add-ons
   # enable_amazon_eks_vpc_cni            = true
